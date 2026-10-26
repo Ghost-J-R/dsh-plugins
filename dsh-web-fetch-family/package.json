@@ -1,0 +1,29 @@
+{
+  "name": "dsh-web-fetch-family",
+  "version": "0.1.0",
+  "private": true,
+  "description": "域名族规则插件（外壳）：把 web_fetch 的 IPv4/IPv6 分族规则单独存放在 $DSH_HOME/web-fetch-family/config.json，并在插件管理页自己的配置页里编辑它。",
+  "type": "module",
+  "license": "MIT",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.cjs",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ]
+    }
+  }
+}

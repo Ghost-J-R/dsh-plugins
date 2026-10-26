@@ -1,0 +1,8 @@
+# Profile bundle: one loader row, nothing else patched.
+#
+# `name` must be exactly the npm package name: dsh-client-modules mounts a
+# package's browser half only on the row whose specifier is that package name,
+# and the plugin manager keys this bundle's config page by that same name.
+- insert:
+    - id: web-fetch-family
+      name: 'dsh-web-fetch-family'
