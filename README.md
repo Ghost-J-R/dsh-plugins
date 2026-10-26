@@ -4,7 +4,7 @@ DeepSeek Harness（DSH）插件集合。每个子目录是一个独立插件，�
 
 | 插件 | 一句话说明 |
 |---|---|
-| [`dsh-chat-rewrite`](dsh-chat-rewrite/) | 直接改写 DSH 会话日志：删除任意一轮对话、删除某条回答、改写中间轮次；打开着的会话也能当场生效 |
+| [`dsh-chat-rewrite`](dsh-chat-rewrite/) | 直接改写 DSH 会话日志：从某一轮起删掉它之后的所有对话（可选只删回答、保留该轮提问）；打开着的会话也能当场生效 |
 | [`dsh-web-fetch-family`](dsh-web-fetch-family/) | 按域名族钉死 `web_fetch` 的连接地址族（IPv4-only / IPv6-only），规则存在独立 JSON 文档里，在插件管理页编辑 |
 
 ## 安装
