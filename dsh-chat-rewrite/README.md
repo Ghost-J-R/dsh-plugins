@@ -73,23 +73,26 @@ DSH 的会话日志是**多个独立 Zstandard 帧的首尾拼接**，而每次�
 4. 写完**立即回读并重新校验**：首帧只有 header、记录不截断、seq 从 0 密集。
 5. 拒绝路径穿越：会话 id 按 Host 的 `encodeSegment` 规则编码后才拼路径。
 
-## 限制（V1）
+## 限制
 
 * **只支持当前格式 v4**；历史 v3 会话需要先在 DSH 里打开一次让它升级到 v4。
 * **只支持尾部截断**（正是 Google AI Studio 的语义：回退到某条 = 删除它之后的一切）。
-  中间编辑（改第 5 轮、保留第 6~10 轮）需要重编号 + 坐标重映射 + 内嵌流重建，不在 V1。
-* **只能改"没被本进程打开过"的会话**。想改刚看过的会话，重启桌面版即可。
+  中间编辑（改第 5 轮、保留第 6~10 轮）需要重编号 + 坐标重映射 + 内嵌流重建，不在当前范围。
+* **打开的会话要能拿到释放能力才当场生效**：插件在加载时接管 `AgentRegistry` 恢复出的
+  `AgentHandle`；插件加载之前就已经打开的会话拿不到它，只能排队到下次启动
+  （重启后新打开的会话都能当场生效）。
 * fork 出来的子会话是父会话前缀的快照副本，改写父会话**不会**同步子会话（这是正确语义）。
 
 ## 安装
 
-```powershell
-node install.mjs                 # 装进当前 profile（默认 desktop）
-node install.mjs --uninstall     # 卸载
-```
+走 **DSH 官方的插件管理通道**，不要手工改 profile 文件：
 
-只改两处：profile 的 `package.json`（依赖 + `dsh.profile.bundles`）和
-`node_modules/dsh-chat-rewrite` 目录联接。不改动任何 DSH 文件。装完**重启桌面版**。
+1. 打开插件管理页（或调用 `plugin_manager` 工具）
+2. 以本地包规格安装本目录：`link:<本目录的绝对路径>`
+3. 重启桌面版
+
+官方通道会自行维护 profile 的依赖、bundle 行与 `node_modules` 联接，并让 `cordis.patch.yml`
+里的 Loader 行生效。仓库里不再附带手工安装脚本。
 
 ## Host 路由
 
