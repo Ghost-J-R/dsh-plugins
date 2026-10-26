@@ -1,7 +1,7 @@
 {
   "name": "dsh-chat-rewrite",
   "version": "0.1.0",
-  "description": "真改写 DSH 会话：在磁盘上删除最后一轮或重答某一轮（帧边界截断，非界面隐藏）",
+  "description": "真改写 DSH 会话日志：从某一轮起删掉它之后的全部对话（可选只删回答、保留该轮提问），帧边界截断而非界面隐藏",
   "type": "module",
   "license": "MIT",
   "main": "./lib/index.js",
