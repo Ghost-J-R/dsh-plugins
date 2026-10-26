@@ -9,9 +9,13 @@ DeepSeek Harness（DSH）插件集合。每个子目录是一个独立插件，�
 
 ## 安装
 
-每个插件目录里有自己的 README，按其中说明安装。两种方式：
+**统一走 DSH 官方的插件管理通道**，仓库里不附带手工安装脚本：
 
-- 有 `install.mjs` 的（如 `dsh-chat-rewrite`）：`node <插件>/install.mjs --profile-dir "%USERPROFILE%\.dsh\profiles\desktop"`
-- 没有的（如 `dsh-web-fetch-family`）：走 DSH 官方的插件管理通道，把该目录作为本地包（`link:<目录>`）安装
+1. 打开插件管理页（或调用 `plugin_manager` 工具）
+2. 把插件目录作为本地包安装：`link:<插件目录绝对路径>`（例如 `link:E:/path/to/dsh-plugins/dsh-chat-rewrite`）
+3. 重启桌面版
 
-装完重启桌面版。
+官方通道会自行维护 profile 的 `dependencies`、`dsh.profile.bundles` 与 `node_modules` 联接，
+`cordis.patch.yml` 里的 Loader 行随之生效。手工改 profile 文件会让这份记录和插件管理器的账本不一致。
+
+各插件的安装前提与依赖写在它自己的 README 里。
