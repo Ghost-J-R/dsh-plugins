@@ -1,0 +1,7 @@
+# Profile bundle: one loader row, nothing else patched.
+#
+# `name` must be exactly the npm package name: the client module system mounts a
+# package's browser half only on the row whose specifier is that package name.
+- insert:
+    - id: chat-rewrite
+      name: 'dsh-chat-rewrite'
