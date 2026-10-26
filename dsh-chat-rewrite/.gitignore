@@ -1,0 +1,9 @@
+# Test sandboxes: every suite builds a throwaway $DSH_HOME under .exp/
+.exp/
+
+# Dependencies
+node_modules/
+
+# Logs and scratch files
+*.log
+*.tmp
