@@ -24,9 +24,10 @@ import {
 } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
-  buildTruncated, decodeSessionLog, findRoundByMessage, planAnchors, summarize, verifyArtifact, SUPPORTED_VERSION,
+  buildTruncated, decodeSessionLog, discoverSubagentLinks, findRoundByMessage, planAnchors, planSubagentCascade,
+  summarize, verifyArtifact, SUPPORTED_VERSION,
 } from './engine.js'
 
 /** Cordis plugin name; must equal the npm package name for the Loader row. */
@@ -52,6 +53,8 @@ const DSH_HOME = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
 const SESSIONS_ROOT = join(DSH_HOME, 'sessions')
 const BACKUP_ROOT = join(DSH_HOME, 'chat-rewrite', 'backups')
 const PENDING_ROOT = join(DSH_HOME, 'chat-rewrite', 'pending')
+/** Per-session projection caches; a deleted child must not leave one behind. */
+const PROJECTION_CACHE_ROOT = join(DSH_HOME, 'storages', 'session_projcache', 'sessions')
 
 /**
  * Encode one raw string into a single safe path segment, exactly as the
@@ -96,6 +99,144 @@ function findLog(sessionId) {
     if (best !== undefined) return best
   }
   return undefined
+}
+
+/**
+ * Delete one session's stored artifacts: its log directory and its projection cache.
+ *
+ * Called only for sessions this plugin is removing on purpose, after their Agent
+ * has been released; a live Agent would fail the delete on Windows and must not
+ * be half-removed.
+ *
+ * @param {string} sessionId - the session to remove.
+ * @returns {{deleted: boolean, cacheDeleted: boolean, error?: string}} what was removed.
+ */
+function deleteSessionArtifacts(sessionId) {
+  const found = findLog(sessionId)
+  let cacheDeleted = false
+  try {
+    const cache = join(PROJECTION_CACHE_ROOT, `${sessionId}.json`)
+    if (existsSync(cache)) {
+      rmSync(cache, { force: true })
+      cacheDeleted = true
+    }
+  } catch (error) {
+    return { deleted: false, cacheDeleted, error: `cache: ${String(error?.message ?? error)}` }
+  }
+  if (found === undefined) return { deleted: false, cacheDeleted, error: 'log not found' }
+  try {
+    rmSync(dirname(found.path), { recursive: true, force: true })
+  } catch (error) {
+    return { deleted: false, cacheDeleted, error: String(error?.message ?? error) }
+  }
+  return { deleted: !existsSync(dirname(found.path)), cacheDeleted }
+}
+
+/**
+ * Whether a stored session is a subagent child this cascade may remove.
+ *
+ * A forked conversation also carries `parentSession`, but it is an independent
+ * copy the user made; removing the parent's rounds must never destroy it.
+ *
+ * @param {object} header - decoded session header.
+ * @returns {boolean} true when the session is a delegation child.
+ */
+function isSubagentChild(header) {
+  if (header?.isSeeded === true) return false
+  if (header?.origin === 'subagent') return true
+  const depth = header?.delegationDepth
+  return typeof depth === 'number' && depth > 0
+}
+
+/**
+ * Collect every session this cut must remove, parents before children.
+ *
+ * A child is removed when its creation record falls inside the dropped region.
+ * Once a child is removed, its own children go with it regardless of where they
+ * were created, so descendants are collected with a cut of 0.
+ *
+ * @param {object} log - the cut session's decoded log.
+ * @param {number} cutIndex - number of leading events kept.
+ * @returns {{removed: string[], skipped: string[], warnings: string[]}} cascade plan.
+ */
+function planCascade(log, cutIndex) {
+  const removed = []
+  const skipped = []
+  const warnings = []
+  const visit = (currentLog, cut) => {
+    const { removed: links } = planSubagentCascade(currentLog, cut)
+    for (const link of links) {
+      if (removed.includes(link.childId)) continue
+      const child = loadSession(link.childId)
+      if (child.error === 'SESSION_NOT_FOUND') {
+        skipped.push(link.childId)
+        removed.push(link.childId)
+        continue
+      }
+      if (child.error !== undefined) {
+        warnings.push(`${link.childId}: ${child.error}`)
+        removed.push(link.childId)
+        continue
+      }
+      if (!isSubagentChild(child.log.header)) {
+        // A fork (or any non-delegation session) linked here stays: it is the
+        // user's independent copy.
+        skipped.push(link.childId)
+        continue
+      }
+      removed.push(link.childId)
+      visit(child.log, 0)
+    }
+  }
+  visit(log, cutIndex)
+  return { removed, skipped, warnings }
+}
+
+/**
+ * Release every live Agent among the sessions a cascade is about to delete.
+ *
+ * Prefers the subagent service's own teardown (`drainChildren`), which keeps its
+ * bookkeeping consistent, and falls back to the handle this plugin captured for
+ * agents the Session controller discarded. Agents that are mid-turn are reported
+ * rather than aborted.
+ *
+ * @param {object} ctx - Host context.
+ * @param {string} parentId - the session being rewritten.
+ * @param {string[]} ids - sessions to release.
+ * @returns {Promise<{released: string[], running: string[], stuck: string[], error?: string}>} outcome.
+ */
+async function cascadeRelease(ctx, parentId, ids) {
+  const agents = ctx.get('agents')
+  const live = ids.filter((id) => agents?.get?.(id) !== undefined)
+  const running = live.filter((id) => agents.get(id)?.status === 'running')
+  if (running.length > 0) return { released: [], running, stuck: [] }
+  const released = []
+  let error
+  if (live.length > 0) {
+    const subagents = ctx.get('subagents')
+    const parentAgent = agents?.get?.(parentId)
+    if (subagents !== undefined && parentAgent !== undefined) {
+      try {
+        await subagents.drainChildren(parentAgent, live)
+      } catch (issue) {
+        error = String(issue?.message ?? issue)
+      }
+    }
+    for (const id of live) {
+      if (agents?.get?.(id) === undefined) { released.push(id); continue }
+      const handle = agentHandles.get(id)
+      if (handle === undefined) continue
+      try {
+        await handle.dispose()
+        agentHandles.delete(id)
+      } catch (issue) {
+        error = error ?? String(issue?.message ?? issue)
+      }
+      if (agents?.get?.(id) === undefined) released.push(id)
+    }
+  }
+  const stuck = live.filter((id) => !released.includes(id) && agents?.get?.(id) !== undefined)
+  return { released, running, stuck, ...error === undefined ? {} : { error } }
 }
 
 /**
@@ -447,6 +588,9 @@ function inspect(ctx, sessionId) {
     live: owned.agent,
     cachedView: owned.session && !owned.agent,
     anchors,
+    // Creation coordinates of this session's subagent children, so the panel can
+    // warn that a cut also removes them.
+    subagents: discoverSubagentLinks(log),
   }
 }
 
@@ -460,17 +604,6 @@ async function applyCut(ctx, body) {
 
   const loaded = loadSession(sessionId)
   if (loaded.error !== undefined) return { status: 409, value: loaded }
-
-  // Release the Host's ownership first when the session is open in this
-  // process: that closes its write handle, so the rewrite below cannot race a
-  // live append. A session resumed before the interception was installed has no
-  // handle; a session mid-turn is refused rather than interrupted.
-  let released = false
-  const outcome = await releaseSession(ctx, sessionId)
-  if (outcome === 'running') return { status: 409, value: { error: 'SESSION_BUSY' } }
-  if (outcome === 'no-handle') return { status: 409, value: { error: 'SESSION_UNCAPTURED' } }
-  if (outcome === 'failed') return { status: 409, value: { error: 'SESSION_IS_LIVE' } }
-  released = outcome === 'released'
 
   const anchor = planAnchors(loaded.log).find((candidate) => candidate.promptSeq === promptSeq)
   if (anchor === undefined) return { status: 409, value: { error: 'ANCHOR_NOT_FOUND' } }
@@ -488,6 +621,33 @@ async function applyCut(ctx, body) {
     return { status: 500, value: { error: 'BUILD_FAILED', detail: String(error?.message ?? error) } }
   }
 
+  // Subagent sessions whose creation record falls inside the dropped region must
+  // go with their parent: their logs are what keeps them discoverable, so
+  // truncating the parent alone leaves them alive and openable.
+  const cascade = planCascade(loaded.log, cut)
+  if (cascade.removed.length > 0) {
+    const busy = cascade.removed.filter((id) => ctx.get('agents')?.get?.(id)?.status === 'running')
+    if (busy.length > 0) {
+      return { status: 409, value: { error: 'SESSION_BUSY_CHILD', sessions: busy } }
+    }
+  }
+  // Release children while the parent Agent still exists: `drainChildren` needs
+  // it as the scope owner. Doing this before the parent's own release is safe
+  // even if that later step fails, because only the Agents go here — their logs
+  // stay until the parent artifact is published.
+  const childRelease = await cascadeRelease(ctx, sessionId, cascade.removed)
+
+  // Release the Host's ownership first when the session is open in this
+  // process: that closes its write handle, so the rewrite below cannot race a
+  // live append. A session resumed before the interception was installed has no
+  // handle; a session mid-turn is refused rather than interrupted.
+  let released = false
+  const outcome = await releaseSession(ctx, sessionId)
+  if (outcome === 'running') return { status: 409, value: { error: 'SESSION_BUSY' } }
+  if (outcome === 'no-handle') return { status: 409, value: { error: 'SESSION_UNCAPTURED' } }
+  if (outcome === 'failed') return { status: 409, value: { error: 'SESSION_IS_LIVE' } }
+  released = outcome === 'released'
+
   // No backup is written here: backups are an explicit user action, so a rewrite
   // adds exactly one disk write (the replaced artifact) and nothing else.
   publishAtomically(loaded.found.path, built.bytes)
@@ -500,6 +660,7 @@ async function applyCut(ctx, body) {
   const verified = verifyArtifact(reread, expectedEvents, loaded.log)
   // Drop the cached in-memory view so the reopened session reads the new file.
   const evicted = evictCachedSession(ctx, sessionId)
+  const cascadeResult = await applyCascade(ctx, sessionId, cascade, childRelease)
   return {
     status: 200,
     value: {
@@ -518,8 +679,51 @@ async function applyCut(ctx, body) {
       // A cached in-memory view of the old log must go, otherwise the reopened
       // session keeps rendering the pre-rewrite history.
       evicted,
+      cascade: cascadeResult,
     },
   }
+}
+
+/**
+ * Release and delete the subagent sessions a cut removes.
+ *
+ * Runs after the parent artifact is published: the parent's kept log no longer
+ * references these children, so leaving their files behind would resurrect them
+ * on the next discovery. A child that cannot be released is left on disk and
+ * reported, because deleting a live Agent's log would corrupt its next append.
+ *
+ * @param {object} ctx - Host context.
+ * @param {string} parentId - the rewritten session.
+ * @param {{removed: string[], skipped: string[], warnings: string[]}} cascade - planned targets.
+ * @param {object} [preReleased] - release outcome already computed while the parent Agent
+ *   still existed; without it the release is attempted here (the queued path, where the
+ *   parent is cold by definition and only a separately opened child can still be live).
+ * @returns {Promise<{removed: string[], deleted: string[], released: string[], skipped: string[], failed: Array<{id: string, reason: string}>, warnings: string[]}>} outcome.
+ */
+async function applyCascade(ctx, parentId, cascade, preReleased) {
+  const result = {
+    removed: cascade.removed,
+    deleted: [],
+    released: [],
+    skipped: cascade.skipped,
+    failed: [],
+    warnings: [...cascade.warnings],
+  }
+  if (cascade.removed.length === 0) return result
+  const release = preReleased ?? await cascadeRelease(ctx, parentId, cascade.removed)
+  result.released = release.released
+  if (release.error !== undefined) result.warnings.push(`release: ${release.error}`)
+  const stuck = new Set([...release.running, ...release.stuck])
+  for (const id of cascade.removed) {
+    if (stuck.has(id)) {
+      result.failed.push({ id, reason: 'agent still live' })
+      continue
+    }
+    const removed = deleteSessionArtifacts(id)
+    if (removed.deleted) result.deleted.push(id)
+    else result.failed.push({ id, reason: removed.error ?? 'log not found' })
+  }
+  return result
 }
 
 /** POST /rewrite-restore — put a backup back. */
@@ -589,7 +793,7 @@ function queueRewrite(body) {
  * may have grown since the request.
  * @param {object} ctx - Host context.
  */
-function applyPendingRewrites(ctx) {
+async function applyPendingRewrites(ctx) {
   if (!existsSync(PENDING_ROOT)) return
   for (const entry of readdirSync(PENDING_ROOT)) {
     if (!entry.endsWith('.json')) continue
@@ -621,10 +825,15 @@ function applyPendingRewrites(ctx) {
       }
       const built = buildTruncated(loaded.log, loaded.bytes, cut)
       verifyArtifact(built.bytes, cut + (built.reseeded ? 1 : 0), loaded.log)
+      // Same cascade contract as the in-app path: children created inside the
+      // dropped region go with the parent, after their Agents are released.
+      const cascade = planCascade(loaded.log, cut)
       publishAtomically(loaded.found.path, built.bytes)
       evictCachedSession(ctx, record.sessionId)
+      const cascaded = await applyCascade(ctx, record.sessionId, cascade)
       rmSync(file, { force: true })
-      ctx.logger?.info?.(`chat-rewrite: applied queued rewrite for "${record.sessionId}" (turn ${record.turn}, ${record.mode})`)
+      ctx.logger?.info?.(`chat-rewrite: applied queued rewrite for "${record.sessionId}" (turn ${record.turn}, ${record.mode})`
+        + (cascaded.deleted.length > 0 ? `, removed ${cascaded.deleted.length} subagent session(s)` : ''))
     } catch (error) {
       ctx.logger?.warn?.(`chat-rewrite: queued rewrite for "${record.sessionId}" failed: ${String(error?.message ?? error)}`)
       rmSync(file, { force: true })
@@ -758,9 +967,7 @@ export function apply(ctx) {
   ctx.inject?.(['agents'], (scope) => { interceptResume(scope) })
   // Boot-time drain of rewrites deferred while a previous Host owned the session.
   // Runs during composition, before any client can open a session.
-  try {
-    applyPendingRewrites(ctx)
-  } catch (error) {
+  void applyPendingRewrites(ctx).catch((error) => {
     ctx.logger?.warn?.(`chat-rewrite: boot-time queue drain failed: ${String(error?.message ?? error)}`)
-  }
+  })
 }

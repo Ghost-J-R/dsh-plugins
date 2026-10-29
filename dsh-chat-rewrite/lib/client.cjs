@@ -104,13 +104,12 @@ window.__ModuleLoader__.load({
       'row.answered': '有回答',
       'row.unanswered': '无回答',
       'row.last': '最后一轮',
+      'row.subagents': '含 {count} 个子智能体',
       'row.reanswer': '重答这条',
       'row.rewind': '回到这条之前',
       'row.reanswerInherited': '重答这条（会把分叉点移到这里，继承的历史变短）',
       'row.rewindInherited': '回到这条之前（会把分叉点移到这里，继承的历史变短）',
       'row.first': '第一轮，无可回退的历史',
-      'row.inherited': '继承自父会话（分叉前的历史），不能删',
-      'row.inheritedBadge': '继承',
       'row.inherited': '继承自父会话（分叉前的历史），不能删',
       'row.inheritedBadge': '继承',
       'confirm.title': '确认改写',
@@ -124,6 +123,10 @@ window.__ModuleLoader__.load({
       'result.after': '已删除第 {turn} 轮之后的回答（{events} 条事件）。重新打开该会话即可看到。',
       'result.restored': '已还原备份 {stamp}。',
       'error.SESSION_BUSY': '这条回复还在生成中，等它结束后再删。',
+      'error.SESSION_BUSY_CHILD': '有 {count} 个子智能体正在运行，等它们跑完再删。',
+      'confirm.subagents': '这段区间里有 {count} 个子智能体会话，会连同它们的对话记录一起删除{labels}。',
+      'result.subagents': '并删除了 {count} 个子智能体会话。',
+      'result.subagentsFailed': '（{count} 个子智能体会话未能删除，见 DSH 日志）',
       'error.SESSION_IS_LIVE': '该会话正被 DSH 占用，暂时无法当场释放。',
       'error.SESSION_NOT_FOUND': '找不到该会话的日志文件。',
       'error.UNSUPPORTED_GENERATION': '该会话是历史格式，暂不支持。',
@@ -167,13 +170,12 @@ window.__ModuleLoader__.load({
       'row.answered': 'answered',
       'row.unanswered': 'no answer',
       'row.last': 'last round',
+      'row.subagents': '{count} subagent(s) inside',
       'row.reanswer': 'Re-answer this',
       'row.rewind': 'Rewind to before this',
       'row.reanswerInherited': 'Re-answer this (moves the fork point here, inheriting less)',
       'row.rewindInherited': 'Rewind to before this (moves the fork point here, inheriting less)',
       'row.first': 'First round: nothing earlier to return to',
-      'row.inherited': 'Inherited from the parent session (pre-fork history); cannot be deleted',
-      'row.inheritedBadge': 'inherited',
       'row.inherited': 'Inherited from the parent session (pre-fork history); cannot be deleted',
       'row.inheritedBadge': 'inherited',
       'confirm.title': 'Confirm rewrite',
@@ -187,6 +189,10 @@ window.__ModuleLoader__.load({
       'result.after': 'Dropped the answers after round {turn} ({events} events). Reopen the session to see it.',
       'result.restored': 'Restored backup {stamp}.',
       'error.SESSION_BUSY': 'That reply is still generating; delete it once it finishes.',
+      'error.SESSION_BUSY_CHILD': '{count} subagent(s) are still running; delete once they finish.',
+      'confirm.subagents': 'This range contains {count} subagent session(s); their conversations are deleted too{labels}.',
+      'result.subagents': ' Removed {count} subagent session(s) as well.',
+      'result.subagentsFailed': ' ({count} subagent session(s) could not be removed; see the DSH log)',
       'error.SESSION_IS_LIVE': 'The session is held by DSH and cannot be released right now.',
       'error.SESSION_NOT_FOUND': 'No stored log for this session.',
       'error.UNSUPPORTED_GENERATION': 'Historical session format is unsupported.',
@@ -492,11 +498,16 @@ window.__ModuleLoader__.load({
           // gone, and an evicted cached view is stale. Either way the transcript
           // must be re-read from the rewritten file.
           const invalidated = result.data?.released === true || result.data?.evicted === true
+          const removedChildren = result.data?.cascade?.deleted?.length ?? 0
+          const failedChildren = result.data?.cascade?.failed?.length ?? 0
+          const base = item.mode === 'before'
+            ? fill(t('result.before'), { round: item.anchor.turn, events: result.data.eventsAfter })
+            : fill(t('result.after'), { turn: item.anchor.turn, events: result.data.eventsAfter })
           setNotice({
-            ok: true,
-            text: item.mode === 'before'
-              ? fill(t('result.before'), { round: item.anchor.turn, events: result.data.eventsAfter })
-              : fill(t('result.after'), { turn: item.anchor.turn, events: result.data.eventsAfter }),
+            ok: failedChildren === 0,
+            text: base
+              + (removedChildren === 0 ? '' : fill(t('result.subagents'), { count: removedChildren }))
+              + (failedChildren === 0 ? '' : fill(t('result.subagentsFailed'), { count: failedChildren })),
           })
           if (invalidated && typeof reload === 'function') {
             try { reload(sessionId) } catch { /* the notice still tells the user to reopen */ }
@@ -504,10 +515,10 @@ window.__ModuleLoader__.load({
           refresh()
           return
         }
-        if (result.data?.error === 'SESSION_BUSY') {
+        if (result.data?.error === 'SESSION_BUSY_CHILD') {
           setPending(null)
           setQueued(false)
-          setNotice({ ok: false, text: t('error.SESSION_BUSY') })
+          setNotice({ ok: false, text: fill(t('error.SESSION_BUSY_CHILD'), { count: result.data.sessions?.length ?? 0 }) })
           refresh()
           return
         }
@@ -600,6 +611,15 @@ window.__ModuleLoader__.load({
         refresh()
       }
 
+      /**
+       * Subagent sessions a cut starting at `cut` would remove: children whose
+       * creation record falls inside the dropped region.
+       * @param {number} cut - the cut index for that action.
+       * @returns {object[]} the affected catalog entries.
+       */
+      const childrenRemovedAt = (cut) => (Array.isArray(data?.subagents) ? data.subagents : [])
+        .filter((link) => link.seq >= cut)
+
       const rows = anchors.slice().reverse().map((anchor, index) => h('li', {
         key: `${anchor.turn}-${anchor.promptSeq}`,
         style: styles.item,
@@ -610,6 +630,12 @@ window.__ModuleLoader__.load({
           h('div', { style: { ...styles.subtle, marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap' } },
             h('span', { style: styles.badge }, anchor.answered ? t('row.answered') : t('row.unanswered')),
             anchor.lastTurn ? h('span', { style: styles.badge }, t('row.last')) : null,
+            (() => {
+              const count = childrenRemovedAt(anchor.cutBefore).length
+              return count === 0
+                ? null
+                : h('span', { style: styles.badge }, fill(t('row.subagents'), { count }))
+            })(),
           ),
         ),
         h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
@@ -632,22 +658,33 @@ window.__ModuleLoader__.load({
         ),
       ))
 
-      const confirmBox = pending === null ? null : h('div', { style: styles.confirm },
-        h('div', { style: { fontWeight: 600, marginBottom: 4 } }, t('confirm.title')),
-        h('div', null, pending.mode === 'before'
-          ? fill(t('confirm.before'), { turn: pending.anchor.turn, dropped: pending.dropped })
-          : fill(t('confirm.after'), { turn: pending.anchor.turn })),
-        h('div', { style: { ...styles.subtle, marginTop: 4 } }, t('confirm.note')),
-        live ? h('div', { style: { ...styles.subtle, marginTop: 4 } }, t('confirm.live')) : null,
-        h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
-          h('button', {
-            type: 'button',
-            style: styles.primary,
-            onClick: () => { void applyPending(pending) },
-          }, t('confirm.yes')),
-          h('button', { type: 'button', style: styles.smallButton, onClick: () => { setPending(null) } }, t('confirm.no')),
-        ),
-      )
+      const confirmBox = pending === null ? null : (() => {
+        const cut = pending.mode === 'before' ? pending.anchor.cutBefore : pending.anchor.cutAfter
+        const children = childrenRemovedAt(cut)
+        return h('div', { style: styles.confirm },
+          h('div', { style: { fontWeight: 600, marginBottom: 4 } }, t('confirm.title')),
+          h('div', null, pending.mode === 'before'
+            ? fill(t('confirm.before'), { turn: pending.anchor.turn, dropped: pending.dropped })
+            : fill(t('confirm.after'), { turn: pending.anchor.turn })),
+          children.length === 0
+            ? null
+            : h('div', { style: { ...styles.subtle, marginTop: 4, color: 'var(--dsw-alias-state-warn-primary)' } },
+                fill(t('confirm.subagents'), {
+                  count: children.length,
+                  labels: children.map((child) => child.label).filter((label) => label !== '').slice(0, 3).join('、'),
+                })),
+          h('div', { style: { ...styles.subtle, marginTop: 4 } }, t('confirm.note')),
+          live ? h('div', { style: { ...styles.subtle, marginTop: 4 } }, t('confirm.live')) : null,
+          h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
+            h('button', {
+              type: 'button',
+              style: styles.primary,
+              onClick: () => { void applyPending(pending) },
+            }, t('confirm.yes')),
+            h('button', { type: 'button', style: styles.smallButton, onClick: () => { setPending(null) } }, t('confirm.no')),
+          ),
+        )
+      })()
 
       const queuedBox = !queued ? null : h('div', {
         style: { ...styles.banner, ...styles.noticeOk },

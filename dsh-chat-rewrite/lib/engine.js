@@ -287,6 +287,60 @@ export function verifyArtifact(buffer, expectedEvents, source) {
 }
 
 /**
+ * Every subagent session a log links to, with the position of its creation record.
+ *
+ * Two event streams announce a child: `subagent/catalog` (the delegation tool)
+ * and `team/member` (Agent Teams). Both carry the child's session id, and a
+ * child can be re-announced later for status changes, so only the FIRST
+ * occurrence counts as its creation coordinate.
+ *
+ * @param {object} log - result of {@link decodeSessionLog}.
+ * @returns {Array<{childId: string, seq: number, label: string, via: 'catalog'|'team'}>} links in log order.
+ */
+export function discoverSubagentLinks(log) {
+  const links = new Map()
+  for (const [index, event] of log.events.entries()) {
+    if (event.type === 'subagent/catalog') {
+      const childId = event.data?.childId
+      if (typeof childId !== 'string' || childId === '') continue
+      const label = typeof event.data?.label === 'string' ? event.data.label : ''
+      const existing = links.get(childId)
+      if (existing === undefined) links.set(childId, { childId, seq: index, label, via: 'catalog' })
+      else if (existing.label === '' && label !== '') existing.label = label
+      continue
+    }
+    if (event.type === 'team/member') {
+      const member = event.data?.member
+      const childId = member?.id
+      if (typeof childId !== 'string' || childId === '') continue
+      const label = typeof member?.description === 'string' ? member.description : ''
+      const existing = links.get(childId)
+      if (existing === undefined) links.set(childId, { childId, seq: index, label, via: 'team' })
+      else if (existing.label === '' && label !== '') existing.label = label
+    }
+  }
+  return [...links.values()]
+}
+
+/**
+ * Split a session's subagent links into the ones a cut removes and the ones it keeps.
+ *
+ * A child whose creation record sits at or after the cut disappears from the kept
+ * log, so the child session itself must go too; a child created earlier stays.
+ *
+ * @param {object} log - result of {@link decodeSessionLog}.
+ * @param {number} cutIndex - number of leading events kept.
+ * @returns {{removed: Array<object>, kept: Array<object>}} partition of {@link discoverSubagentLinks}.
+ */
+export function planSubagentCascade(log, cutIndex) {
+  const links = discoverSubagentLinks(log)
+  return {
+    removed: links.filter((link) => link.seq >= cutIndex),
+    kept: links.filter((link) => link.seq < cutIndex),
+  }
+}
+
+/**
  * Resolve the human round that owns one assistant message, so a delete button
  * rendered on that message can target the round it belongs to.
  * @param {object} log - result of {@link decodeSessionLog}.

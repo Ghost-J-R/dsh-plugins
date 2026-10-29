@@ -1,6 +1,6 @@
 # dsh-chat-rewrite
 
-真改写 DSH 会话的第三方面板：**在磁盘上**删掉最后一轮、或重答某一轮。
+真改写 DSH 会话的第三方面板：**在磁盘上**从某一轮起删掉它之后的全部对话（可选只删回答、保留提问）。
 不是界面隐藏——它直接重写 `$DSH_HOME/sessions/<项目>/<会话>/session.v4.jsonl.zstd`。
 
 ## 它做什么
@@ -18,15 +18,27 @@
 
 第一轮不可"回到之前"（没有更早的历史）。
 
+**子智能体会话一并删除**：会话里被派生的子智能体（`subagent` / Agent Teams 成员）各自是独立的
+会话日志，只截断父日志会让它们继续存在、对话记录也还能打开。截断时插件按父日志里的
+`subagent/catalog` 与 `team/member` 事件定位"创建记录落在被删区间内"的子会话，
+**先释放其活动 Agent、再删除其日志与投影缓存**，并递归处理它们自己派生的孙会话。
+
+- 创建记录在**保留区间内**的子会话不受影响；
+- 用户手工 fork 出来的会话（`isSeeded`）不是委派产物，**永不删除**；
+- 任一待删子会话**正在运行**时整体拒绝（`SESSION_BUSY_CHILD`），不打断进行中的任务；
+- 释放失败（例如子会话被单独打开且拿不到释放能力）时**保留其日志**并在结果里报告，不假称删掉。
+
 **打开的会话也能当场删**：DSH 的 Session controller 会把 `AgentHandle`（唯一能释放会话的能力）丢掉，
 所以没有任何受支持的 API 能释放一个正在被 Host 持有的会话。插件在 Host 进程内包装
-`AgentRegistry.resume`，把每个 handle 记下来，需要时：
+`AgentRegistry.resume` 与 `AgentRegistry.create`（fork 子会话走后者），把每个 handle 记下来，需要时：
 
 ```
-dispose(handle)  → 会话被释放（写句柄关闭、租约释放）
-                 → 帧边界截断日志
-                 → 客户端 session.resync() 重新读盘
-                 → 界面立刻显示截断后的历史
+释放子智能体（subagents.drainChildren / handle.dispose）
+  → dispose(handle) 父会话被释放（写句柄关闭、租约释放）
+  → 帧边界截断日志
+  → 删除被解链的子智能体会话
+  → 客户端 session.resync() 重新读盘
+  → 界面立刻显示截断后的历史
 ```
 
 * 正在生成（`agent.status === 'running'`）时拒绝删除，避免砍掉进行中的 turn。
@@ -117,7 +129,7 @@ DSH 的会话日志是**多个独立 Zstandard 帧的首尾拼接**，而每次�
 
 ## 开发自测
 
-七套自测，前六套自带沙箱（`.exp/sandbox-*` 的假 `$DSH_HOME`），**不会写入真实会话**；
+八套自测，前七套自带沙箱（`.exp/sandbox-*` 的假 `$DSH_HOME`），**不会写入真实会话**；
 `test-theme` 只读源码：
 
 ```powershell
@@ -125,6 +137,7 @@ node tools/test-host.mjs         # 宿主：inspect / apply / restore / 护栏 /
 node tools/test-release.mjs      # 释放 live 会话 + 当场改写
 node tools/test-cachedview.mjs   # 只有缓存视图（无 Agent）时直接改写
 node tools/test-seeded.mjs       # fork 继承轮删除（重设切点）
+node tools/test-cascade.mjs      # 子智能体会话级联删除：递归 / fork 保留 / running 拒绝 / 释放失败上报
 node tools/test-backups.mjs      # 备份：手动创建 / 删除 / 清空，改写不留备份
 node tools/test-queue.mjs        # 排队兜底 + 启动执行
 node tools/test-theme.mjs        # 面板只用官方 token：无写死颜色、无自造 token
