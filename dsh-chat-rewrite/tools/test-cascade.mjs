@@ -30,6 +30,9 @@ const FORK = 'session-forked-copy'
 /** Second scenario: cold parent, live child, and no captured handle for it. */
 const PARENT2 = 'session-cascade-parent-cold'
 const CHILD_C = 'dddddddd-0000-4000-8000-000000000004'
+/** Third scenario: a fork inherits its parent's subagent links but owns none of them. */
+const FORKED = 'session-cascade-forked'
+const CHILD_F = 'eeeeeeee-0000-4000-8000-000000000005'
 
 /** Compress one frame exactly like the Host writer (checksum on). */
 const frame = (text) => zstdCompressSync(Buffer.from(text, 'utf8'), {
@@ -92,6 +95,25 @@ writeLog(join(logs, PARENT2), header(PARENT2), [
   { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } },
 ])
 writeLog(join(logs, CHILD_C), header(CHILD_C, { origin: 'subagent', parentSession: PARENT2, delegationDepth: 1 }), round(1, '子会话 C'))
+
+// Third scenario: a fork copies its parent's prefix, so its log carries the
+// parent's subagent links too — those children answer to PARENT, not to the fork.
+// Only CHILD_F (parentSession = FORK) is the fork's own.
+writeLog(join(logs, FORKED), header(FORKED, { isSeeded: true, parentSession: PARENT, delegationDepth: 0 }), [
+  { type: 'turn/start', data: { turn: 1 } },
+  { type: 'user/message', data: { id: 'prompt-forked-1', turn: 1, source: { kind: 'user' }, content: [{ type: 'text', text: '继承前缀里的第一轮' }] } },
+  { type: 'subagent/catalog', data: { version: 0, childId: CHILD_A, mode: 'one-shot', label: '继承来的子会话 A' } },
+  { type: 'subagent/catalog', data: { version: 0, childId: CHILD_B, mode: 'continuable', label: '继承来的子会话 B' } },
+  { type: 'assistant/message', data: { turn: 1, message: { id: 'answer-forked-1', role: 'assistant', content: [{ type: 'text', text: '答复 1' }] } } },
+  { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  { type: 'session/end-seed', data: { inherited: true } },
+  { type: 'turn/start', data: { turn: 2 } },
+  { type: 'user/message', data: { id: 'prompt-forked-2', turn: 2, source: { kind: 'user' }, content: [{ type: 'text', text: 'fork 自己派生的第二轮' }] } },
+  { type: 'subagent/catalog', data: { version: 0, childId: CHILD_F, mode: 'one-shot', label: 'fork 自己的子会话' } },
+  { type: 'assistant/message', data: { turn: 2, message: { id: 'answer-forked-2', role: 'assistant', content: [{ type: 'text', text: '答复 2' }] } } },
+  { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } },
+])
+writeLog(join(logs, CHILD_F), header(CHILD_F, { origin: 'subagent', parentSession: FORKED, delegationDepth: 1 }), round(1, 'fork 自己的子会话'))
 
 process.env.DSH_HOME = SANDBOX
 const { apply } = await import(pathToFileURL(join(PACKAGE, 'lib', 'index.js')).href)
@@ -191,6 +213,24 @@ check('running child refuses the cut', blocked.status === 409 && blocked.data.er
   JSON.stringify(blocked.data))
 check('nothing deleted while blocked', existsSync(dirOf(CHILD_B)) && existsSync(dirOf(PARENT)))
 agents.live.set(CHILD_B, 'idle')
+
+// 2b. A fork inherits its parent's links: only its own child may be counted or removed.
+const forkInspected = await call(`/rewrite-inspect?sessionId=${FORKED}`, 'GET')
+check('fork inspect reports only its own child', forkInspected.data.subagents?.length === 1,
+  JSON.stringify(forkInspected.data.subagents))
+check('fork inspect excludes the inherited links',
+  !(forkInspected.data.subagents ?? []).some((link) => link.childId === CHILD_A || link.childId === CHILD_B))
+const forkAnchor2 = (forkInspected.data.anchors ?? []).find((anchor) => anchor.turn === 2)
+const forkCut = await call('/rewrite-apply', 'POST', {
+  sessionId: FORKED, promptSeq: forkAnchor2.promptSeq, mode: 'before', confirm: true,
+})
+check('fork cut 200', forkCut.status === 200, JSON.stringify(forkCut.data).slice(0, 200))
+check('fork own child removed', forkCut.data.cascade?.deleted?.includes(CHILD_F),
+  JSON.stringify(forkCut.data.cascade))
+check('inherited children were not touched',
+  forkCut.data.cascade?.deleted?.length === 1
+  && existsSync(dirOf(CHILD_A)) && existsSync(dirOf(CHILD_B)),
+  JSON.stringify(forkCut.data.cascade))
 
 // 3. Cut before round 3: drops child B (and its grandchild) but keeps child A and the fork.
 const applied = await call('/rewrite-apply', 'POST', {

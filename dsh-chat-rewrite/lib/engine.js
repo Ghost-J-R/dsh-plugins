@@ -74,6 +74,30 @@ export function scanZstdFrames(buffer) {
  *   version: number,
  * }} the decoded log; `bodyFrames[i]` holds the raw event lines of frame i+1.
  */
+/**
+ * Read only a session's header: decompress the first frame and parse its line.
+ *
+ * Ownership checks run for every subagent link a panel refresh sees, so they must
+ * not pay for decoding a multi-megabyte log. The header alone carries `id`,
+ * `parentSession`, `isSeeded` and `delegationDepth`.
+ *
+ * @param {Buffer} buffer - the stored artifact bytes.
+ * @returns {object} the parsed header.
+ */
+export function decodeSessionHeader(buffer) {
+  const [frame] = scanZstdFrames(buffer)
+  if (frame === undefined) throw new Error('artifact holds no frame')
+  const plain = zstdDecompressSync(buffer.subarray(frame.start, frame.end)).toString('utf8')
+  const headerLine = plain.split('\n')[0]
+  if (plain !== `${headerLine}\n`) throw new Error('first frame is not exactly one header line')
+  return JSON.parse(headerLine)
+}
+
+/**
+ * Decode a whole session log: header frame plus every event frame.
+ * @param {Buffer} buffer - the stored artifact bytes.
+ * @returns {object} the decoded log.
+ */
 export function decodeSessionLog(buffer) {
   const frames = scanZstdFrames(buffer)
   const plain = frames.map((frame) => zstdDecompressSync(buffer.subarray(frame.start, frame.end)).toString('utf8'))

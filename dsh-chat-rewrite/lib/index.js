@@ -26,8 +26,8 @@ import { createHash, randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
-  buildTruncated, decodeSessionLog, discoverSubagentLinks, findRoundByMessage, planAnchors, planSubagentCascade,
-  summarize, verifyArtifact, SUPPORTED_VERSION,
+  buildTruncated, decodeSessionHeader, decodeSessionLog, discoverSubagentLinks, findRoundByMessage, planAnchors,
+  planSubagentCascade, summarize, verifyArtifact, SUPPORTED_VERSION,
 } from './engine.js'
 
 /** Cordis plugin name; must equal the npm package name for the Loader row. */
@@ -149,33 +149,71 @@ function isSubagentChild(header) {
 }
 
 /**
+ * Read one stored session's header without decoding its events.
+ * @param {string} sessionId - the session identity.
+ * @returns {object|undefined} the header, or undefined when it cannot be read.
+ */
+function readSessionHeader(sessionId) {
+  const found = findLog(sessionId)
+  if (found === undefined) return undefined
+  try {
+    return decodeSessionHeader(readFileSync(found.path))
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The subagent links that actually belong to this session.
+ *
+ * A forked conversation copies its parent's prefix verbatim, so its log carries
+ * the parent's `subagent/catalog` and `team/member` records too. Those children
+ * answer to the parent session, not to the fork: counting them makes the panel
+ * promise to delete sessions the fork does not own, and acting on them would
+ * delete the parent's subagents. Ownership is therefore decided by the child's
+ * own `parentSession`, which also excludes children whose log is gone.
+ *
+ * @param {string} sessionId - the session being inspected or cut.
+ * @param {object} log - that session's decoded log.
+ * @returns {Array<{childId: string, seq: number, label: string, via: string}>} owned links only.
+ */
+function ownSubagentLinks(sessionId, log) {
+  return discoverSubagentLinks(log).filter((link) => readSessionHeader(link.childId)?.parentSession === sessionId)
+}
+
+/**
  * Collect every session this cut must remove, parents before children.
  *
- * A child is removed when its creation record falls inside the dropped region.
- * Once a child is removed, its own children go with it regardless of where they
- * were created, so descendants are collected with a cut of 0.
+ * A child is removed when its creation record falls inside the dropped region
+ * AND the child session names this session as its parent. Once a child is
+ * removed, its own children go with it regardless of where they were created,
+ * so descendants are collected with a cut of 0.
  *
+ * @param {string} sessionId - the session being cut.
  * @param {object} log - the cut session's decoded log.
  * @param {number} cutIndex - number of leading events kept.
  * @returns {{removed: string[], skipped: string[], warnings: string[]}} cascade plan.
  */
-function planCascade(log, cutIndex) {
+function planCascade(sessionId, log, cutIndex) {
   const removed = []
   const skipped = []
   const warnings = []
-  const visit = (currentLog, cut) => {
+  const visit = (ownerId, currentLog, cut) => {
+    const owned = ownSubagentLinks(ownerId, currentLog)
     const { removed: links } = planSubagentCascade(currentLog, cut)
+    const ownedIds = new Set(owned.map((link) => link.childId))
     for (const link of links) {
       if (removed.includes(link.childId)) continue
-      const child = loadSession(link.childId)
-      if (child.error === 'SESSION_NOT_FOUND') {
+      if (!ownedIds.has(link.childId)) {
+        // Inherited from the pre-fork prefix, or the child log is gone: this
+        // session cannot prove the child is its own, so it stays untouched.
         skipped.push(link.childId)
-        removed.push(link.childId)
         continue
       }
+      const child = loadSession(link.childId)
       if (child.error !== undefined) {
         warnings.push(`${link.childId}: ${child.error}`)
-        removed.push(link.childId)
+        skipped.push(link.childId)
         continue
       }
       if (!isSubagentChild(child.log.header)) {
@@ -185,10 +223,10 @@ function planCascade(log, cutIndex) {
         continue
       }
       removed.push(link.childId)
-      visit(child.log, 0)
+      visit(link.childId, child.log, 0)
     }
   }
-  visit(log, cutIndex)
+  visit(sessionId, log, cutIndex)
   return { removed, skipped, warnings }
 }
 
@@ -590,7 +628,7 @@ function inspect(ctx, sessionId) {
     anchors,
     // Creation coordinates of this session's subagent children, so the panel can
     // warn that a cut also removes them.
-    subagents: discoverSubagentLinks(log),
+    subagents: ownSubagentLinks(sessionId, log),
   }
 }
 
@@ -624,7 +662,7 @@ async function applyCut(ctx, body) {
   // Subagent sessions whose creation record falls inside the dropped region must
   // go with their parent: their logs are what keeps them discoverable, so
   // truncating the parent alone leaves them alive and openable.
-  const cascade = planCascade(loaded.log, cut)
+  const cascade = planCascade(sessionId, loaded.log, cut)
   if (cascade.removed.length > 0) {
     const busy = cascade.removed.filter((id) => ctx.get('agents')?.get?.(id)?.status === 'running')
     if (busy.length > 0) {
@@ -827,7 +865,7 @@ async function applyPendingRewrites(ctx) {
       verifyArtifact(built.bytes, cut + (built.reseeded ? 1 : 0), loaded.log)
       // Same cascade contract as the in-app path: children created inside the
       // dropped region go with the parent, after their Agents are released.
-      const cascade = planCascade(loaded.log, cut)
+      const cascade = planCascade(record.sessionId, loaded.log, cut)
       publishAtomically(loaded.found.path, built.bytes)
       evictCachedSession(ctx, record.sessionId)
       const cascaded = await applyCascade(ctx, record.sessionId, cascade)

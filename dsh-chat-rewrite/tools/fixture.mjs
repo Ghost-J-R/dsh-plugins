@@ -14,7 +14,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { decodeSessionLog } from '../lib/engine.js'
+import { decodeSessionLog, planAnchors } from '../lib/engine.js'
 
 /**
  * Every stored session log under one home's `sessions/` tree.
@@ -53,8 +53,12 @@ export function findSessionLog({ seeded = false } = {}) {
         decoded = decodeSessionLog(readFileSync(log))
       } catch { continue }
       if (seeded && decoded.header.isSeeded !== true) continue
-      // A fixture needs at least one human round to rewrite.
+      // The suites rewind and re-answer rounds, so the fixture needs at least
+      // three human rounds: one to rewind past, plus room for a second action.
+      // A short session (a single prompt) would make those assertions fail for a
+      // reason unrelated to the code under test.
       if (decoded.events.length < 20) continue
+      if (planAnchors(decoded).length < 3) continue
       return log
     }
   }
