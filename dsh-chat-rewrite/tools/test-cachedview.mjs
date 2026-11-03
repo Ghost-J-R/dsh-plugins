@@ -95,7 +95,8 @@ check('no automatic backup written', !existsSync(join(SANDBOX, 'chat-rewrite', '
 
 // 3. the rewritten file is what the reader will see next.
 const after = await call(`/rewrite-inspect?sessionId=${SESSION}`, 'GET')
-check('round count reflects the rewrite', after.data.events === last.cutAfter, `events=${after.data.events} expected=${last.cutAfter}`)
+check('round count reflects the rewrite', after.data.events === applied.data.eventsAfter,
+  `events=${after.data.events} expected=${applied.data.eventsAfter} (cut=${last.cutAfter} closers=${applied.data.closers})`)
 
 // 4. an agent-owned session is still protected.
 agentsService.get = (id) => (id === SESSION ? { id } : undefined)

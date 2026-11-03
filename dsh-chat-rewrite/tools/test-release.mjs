@@ -111,7 +111,8 @@ check('no automatic backup written', !existsSync(join(SANDBOX, 'chat-rewrite', '
 
 const after = await call(`/rewrite-inspect?sessionId=${SESSION}`, 'GET')
 check('session no longer live', after.data.live === false)
-check('prompt kept, answer dropped', after.data.events === last.cutAfter, `events=${after.data.events} expected=${last.cutAfter}`)
+check('prompt kept, answer dropped', after.data.events === applied.data.eventsAfter,
+  `events=${after.data.events} expected=${applied.data.eventsAfter} (cut=${last.cutAfter} closers=${applied.data.closers})`)
 check('last round now unanswered', after.data.anchors.at(-1)?.answered === false)
 
 // A second press must not resurrect or double-dispose anything.

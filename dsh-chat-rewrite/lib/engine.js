@@ -228,8 +228,41 @@ export function planAnchors(log) {
 }
 
 /**
+ * Closing events a cut must append so the kept tail is not an open turn.
+ *
+ * "Re-answer" keeps the prompt, which lands inside `turn/start … step/start`. A
+ * log whose last turn never ends is indistinguishable from a process that died
+ * mid-turn: on the next start the Host repairs it by appending
+ * `turn/end {reason:{kind:'interrupted'}}`, and the transcript then shows the
+ * "process exited before this turn finished" warning. Writing the same closing
+ * events ourselves — with the `aborted` reason a user-stopped turn carries —
+ * keeps the artifact honest and leaves nothing for the Host to repair.
+ *
+ * @param {object[]} kept - events that survive the cut, in order.
+ * @returns {object[]} `step/end` (when a step is open) and `turn/end` (when a turn is open).
+ */
+function closingEvents(kept) {
+  let openTurn
+  let openStep
+  for (const event of kept) {
+    if (event.type === 'turn/start') { openTurn = event.data?.turn; openStep = undefined }
+    if (event.type === 'turn/end') { openTurn = undefined; openStep = undefined }
+    if (event.type === 'step/start') openStep = { turn: event.data?.turn, step: event.data?.step }
+    if (event.type === 'step/end') openStep = undefined
+  }
+  if (openTurn === undefined) return []
+  const closers = []
+  if (openStep !== undefined && openStep.turn === openTurn) {
+    closers.push({ type: 'step/end', data: { turn: openStep.turn, step: openStep.step } })
+  }
+  closers.push({ type: 'turn/end', data: { turn: openTurn, reason: { kind: 'aborted', reason: { kind: 'user' } } } })
+  return closers
+}
+
+/**
  * Build the truncated artifact: prefix frames verbatim, one straddling frame
- * recompressed, everything after dropped.
+ * recompressed, everything after dropped, and the kept tail closed if it ended
+ * mid-turn.
  *
  * A forked (seeded) session is handled in one of two ways:
  *  - cutting AFTER its inherited marker keeps that marker in place;
@@ -241,7 +274,7 @@ export function planAnchors(log) {
  * @param {object} log - result of {@link decodeSessionLog}.
  * @param {Buffer} buffer - the original artifact bytes.
  * @param {number} cutIndex - number of leading events to keep.
- * @returns {{bytes: Buffer, copied: number, recompressed: number, dropped: number, reseeded: boolean}} the new artifact.
+ * @returns {{bytes: Buffer, copied: number, recompressed: number, dropped: number, reseeded: boolean, closers: number}} the new artifact.
  */
 export function buildTruncated(log, buffer, cutIndex) {
   if (!Number.isSafeInteger(cutIndex) || cutIndex < 1 || cutIndex > log.events.length) {
@@ -276,11 +309,20 @@ export function buildTruncated(log, buffer, cutIndex) {
     recompressed++
     dropped += lines.length - keep.length
   }
+  let nextSeq = cutIndex
   if (reseeded) {
-    const marker = { type: 'session/end-seed', seq: cutIndex, time: Date.now(), data: { inherited: true } }
+    const marker = { type: 'session/end-seed', seq: nextSeq, time: Date.now(), data: { inherited: true } }
     chunks.push(compressFrame(`${JSON.stringify(marker)}\n`))
+    nextSeq++
   }
-  return { bytes: Buffer.concat(chunks), copied, recompressed, dropped, reseeded }
+  // Close an open tail AFTER the marker: the marker is the inherited cut, and the
+  // closing events are the fork's own records of how that turn ended.
+  const closers = closingEvents(log.events.slice(0, cutIndex))
+  if (closers.length > 0) {
+    const lines = closers.map((event, index) => JSON.stringify({ ...event, seq: nextSeq + index, time: Date.now() + index }))
+    chunks.push(compressFrame(`${lines.join('\n')}\n`))
+  }
+  return { bytes: Buffer.concat(chunks), copied, recompressed, dropped, reseeded, closers: closers.length }
 }
 
 /**

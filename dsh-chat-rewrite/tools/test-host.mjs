@@ -10,6 +10,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync,
 import { join, resolve } from 'node:path'
 import { findSessionLog } from './fixture.mjs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { decodeSessionLog } from '../lib/engine.js'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 const PACKAGE = resolve(here, '..')
@@ -108,7 +109,16 @@ check('manual backup of the original', firstBackup.status === 200, JSON.stringif
 const last = inspected.data.anchors.at(-1)
 const reapplied = await post('/rewrite-apply', { sessionId: SESSION, promptSeq: last.promptSeq, mode: 'after', confirm: true })
 check('apply after 200', reapplied.status === 200, JSON.stringify(reapplied.data).slice(0, 160))
-check('apply dropped events', reapplied.data.eventsAfter === last.cutAfter, `cut=${reapplied.data.eventsAfter} expected=${last.cutAfter}`)
+check('apply dropped events',
+  reapplied.data.eventsAfter === last.cutAfter + reapplied.data.closers,
+  `eventsAfter=${reapplied.data.eventsAfter} cut=${last.cutAfter} closers=${reapplied.data.closers}`)
+// The tail must not stay mid-turn: an open turn is what the Host repairs as an
+// interrupted (crashed) turn on the next start, which the user sees as an error.
+check('re-answer closes the open turn', reapplied.data.closers > 0, JSON.stringify(reapplied.data.closers))
+const closedTail = decodeSessionLog(readFileSync(join(sessionDir, 'session.v4.jsonl.zstd'))).events.at(-1)
+check('tail ends with turn/end(aborted)',
+  closedTail?.type === 'turn/end' && closedTail?.data?.reason?.kind === 'aborted',
+  JSON.stringify({ type: closedTail?.type, reason: closedTail?.data?.reason }))
 const afterBytes = readFileSync(join(sessionDir, 'session.v4.jsonl.zstd'))
 check('file changed on disk', afterBytes.length !== originalBytes.length, `${originalBytes.length} -> ${afterBytes.length}`)
 const backups = readdirSync(join(SANDBOX, 'chat-rewrite', 'backups', SESSION))
@@ -119,7 +129,8 @@ const reinspected = await get(`/rewrite-inspect?sessionId=${SESSION}`)
 check('re-answer keeps the round', reinspected.data.anchors?.length === baseAnchors,
   `got ${reinspected.data.anchors?.length} expected ${baseAnchors}`)
 check('re-answer leaves it unanswered', reinspected.data.anchors.at(-1)?.answered === false)
-check('re-inspect shrunk', reinspected.data.events === last.cutAfter, `got ${reinspected.data.events}`)
+check('re-inspect shrunk', reinspected.data.events === reapplied.data.eventsAfter,
+  `got ${reinspected.data.events} expected ${reapplied.data.eventsAfter}`)
 
 // 6. rewind past the last round (drop the whole round)
 const rewound = await post('/rewrite-apply', {

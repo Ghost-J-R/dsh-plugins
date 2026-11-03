@@ -654,7 +654,7 @@ async function applyCut(ctx, body) {
   let built
   try {
     built = buildTruncated(loaded.log, loaded.bytes, cut)
-    verifyArtifact(built.bytes, cut + (built.reseeded ? 1 : 0), loaded.log)
+    verifyArtifact(built.bytes, cut + (built.reseeded ? 1 : 0) + built.closers, loaded.log)
   } catch (error) {
     return { status: 500, value: { error: 'BUILD_FAILED', detail: String(error?.message ?? error) } }
   }
@@ -690,9 +690,10 @@ async function applyCut(ctx, body) {
   // adds exactly one disk write (the replaced artifact) and nothing else.
   publishAtomically(loaded.found.path, built.bytes)
 
-  // A re-seeded cut appends a fresh inherited marker, so the artifact holds one
-  // more event than the cut itself.
-  const expectedEvents = cut + (built.reseeded ? 1 : 0)
+  // A re-seeded cut appends a fresh inherited marker, and a cut that lands inside
+  // a turn appends its closing events, so the artifact holds more than `cut`
+  // events — new ones at the end, never a shifted coordinate.
+  const expectedEvents = cut + (built.reseeded ? 1 : 0) + built.closers
   // Prove the file on disk is what the Host reader will accept.
   const reread = readFileSync(loaded.found.path)
   const verified = verifyArtifact(reread, expectedEvents, loaded.log)
@@ -705,6 +706,9 @@ async function applyCut(ctx, body) {
       ok: true,
       cut,
       reseeded: built.reseeded,
+      // Events appended after the cut: a reseed marker and/or the closing
+      // `step/end` + `turn/end` that keep the tail from looking interrupted.
+      closers: built.closers,
       eventsBefore: loaded.log.events.length,
       eventsAfter: expectedEvents,
       dropped: built.dropped,
@@ -862,7 +866,7 @@ async function applyPendingRewrites(ctx) {
         continue
       }
       const built = buildTruncated(loaded.log, loaded.bytes, cut)
-      verifyArtifact(built.bytes, cut + (built.reseeded ? 1 : 0), loaded.log)
+      verifyArtifact(built.bytes, cut + (built.reseeded ? 1 : 0) + built.closers, loaded.log)
       // Same cascade contract as the in-app path: children created inside the
       // dropped region go with the parent, after their Agents are released.
       const cascade = planCascade(record.sessionId, loaded.log, cut)

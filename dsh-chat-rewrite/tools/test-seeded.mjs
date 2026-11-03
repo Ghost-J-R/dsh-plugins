@@ -52,17 +52,21 @@ check('later rounds are rewindable', anchors.filter((anchor) => anchor.rewindabl
 for (const [label, anchor] of [['rewind', inherited.at(-1)], ['re-answer', anchors.at(-1)]]) {
   const cut = label === 'rewind' ? anchor.cutBefore : anchor.cutAfter
   const built = engine.buildTruncated(log, buffer, cut)
-  console.log(`\n[${label}] cut=${cut} reseeded=${built.reseeded} bytes ${buffer.length} -> ${built.bytes.length}`)
-  const verified = engine.verifyArtifact(built.bytes, cut + (built.reseeded ? 1 : 0), log)
+  console.log(`\n[${label}] cut=${cut} reseeded=${built.reseeded} closers=${built.closers} bytes ${buffer.length} -> ${built.bytes.length}`)
+  const verified = engine.verifyArtifact(built.bytes, cut + (built.reseeded ? 1 : 0) + built.closers, log)
   const out = engine.decodeSessionLog(built.bytes)
   check(`${label}: artifact is still seeded`, out.header.isSeeded === true)
+  check(`${label}: tail is not left mid-turn`, out.events.filter((e) => e.type === 'turn/start').length
+    === out.events.filter((e) => e.type === 'turn/end').length,
+  `starts=${out.events.filter((e) => e.type === 'turn/start').length} ends=${out.events.filter((e) => e.type === 'turn/end').length}`)
   if (built.reseeded) {
-    // Cutting inside the inherited prefix writes a fresh marker at the new cut.
-    check(`${label}: new marker is the last event`,
-      out.events.at(-1).type === 'session/end-seed' && out.events.at(-1).data.inherited === true,
-      JSON.stringify(out.events.at(-1)?.type))
-    check(`${label}: marker seq equals the new cut`, out.seededCut === out.events.length - 1,
-      `seededCut=${out.seededCut} last=${out.events.length - 1}`)
+    // Cutting inside the inherited prefix writes a fresh marker at the new cut;
+    // any closing events follow it, so the marker itself stays the cut coordinate.
+    check(`${label}: new marker sits at the cut`,
+      out.events[cut]?.type === 'session/end-seed' && out.events[cut]?.data?.inherited === true,
+      JSON.stringify(out.events.slice(cut, cut + 2).map((e) => e.type)))
+    check(`${label}: marker seq equals the new cut`, out.seededCut === cut,
+      `seededCut=${out.seededCut} cut=${cut}`)
   } else {
     // A plain tail cut keeps the original inherited prefix and its marker.
     check(`${label}: original marker survives`, out.seededCut === log.seededCut,
