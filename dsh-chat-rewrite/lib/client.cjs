@@ -510,7 +510,7 @@ window.__ModuleLoader__.load({
               + (failedChildren === 0 ? '' : fill(t('result.subagentsFailed'), { count: failedChildren })),
           })
           if (invalidated && typeof reload === 'function') {
-            try { reload(sessionId) } catch { /* the notice still tells the user to reopen */ }
+            void reload(sessionId)
           }
           refresh()
           return
@@ -804,18 +804,54 @@ window.__ModuleLoader__.load({
       const target = createTargetStore()
       ensureStyles(ctx)
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'chat-rewrite: dictionaries')
+      /** How long to wait for the Host catalog to list a reopened session again. */
+      const RELIST_TIMEOUT_MS = 2000
+      const RELIST_INTERVAL_MS = 100
       /**
-       * Reopen one session's history on the client so a released-and-rewritten
-       * session shows the new transcript without a page reload.
-       * @param {string} sessionId - Session whose history to reopen.
+       * Refresh one session on the client after its log was rewritten.
+       *
+       * Two things must happen, and the second one is not obvious:
+       *
+       * 1. The transcript is reloaded — the file on disk is the truncated one.
+       * 2. The sticky `removed` flag is cleared. Releasing the Host's Agent makes
+       *    the Host emit `session/disposed` and therefore `api-session/removed`;
+       *    the client records that on the resident view as `removed = true` and
+       *    never resets it (`handleSessionAdded` only touches the blank bit).
+       *    The composer reads that flag (`disabled = removed || …`) and shows
+       *    "session unavailable" with input locked — which is exactly what the
+       *    user sees until switching tabs creates a brand-new Session instance.
+       *
+       * History alone cannot fix it: `Session.resync()` only rebuilds the event
+       * stream. So once the reopened session is listed by the catalog again (the
+       * Host re-adds it as it resumes), the flag describes nothing true and is
+       * put back to the value a fresh instance starts with. The wait is bounded,
+       * and a session that never returns is left untouched, so a vanished or
+       * archived session never gets a live composer.
+       *
+       * @param {string} sessionId - Session whose transcript must be reloaded.
+       * @returns {Promise<void>} resolves when the reload and flag repair settle.
        */
-      const reload = (sessionId) => {
+      const reload = async (sessionId) => {
         try {
           const sessions = ctx.get('sessions')
           const session = sessions?.binding?.(sessionId)?.session
-          if (typeof session?.resync === 'function') void session.resync()
+          if (session === undefined || session === null) return
+          if (typeof session.resync === 'function') await session.resync()
+          const listed = () => {
+            const list = sessions?.list?.getSnapshot?.()
+            return list?.phase === 'ready' && list.byId?.[sessionId] !== undefined
+          }
+          const deadline = Date.now() + RELIST_TIMEOUT_MS
+          while (!listed() && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, RELIST_INTERVAL_MS))
+          }
+          if (listed() && session.removed === true) {
+            session.removed = false
+            session.notifier?.markDirty?.()
+          }
         } catch {
-          // The result notice already tells the user to reopen the session.
+          // Without the repair the transcript is still reloaded; the input box
+          // then recovers the way it always did, by reopening the session.
         }
       }
       ctx.slots.inject('conversation.chat.assistant-actions', () => ctx.slots.register({

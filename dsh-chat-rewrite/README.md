@@ -50,6 +50,11 @@ DSH 下次启动会把它当成"进程异常退出"补写 `turn/end {interrupted
   → 界面立刻显示截断后的历史
 ```
 
+释放会让 Host 广播 `api-session/removed`，客户端把它记成常驻视图上的 `removed` 标志（只有新建实例才回到
+`false`），输入框据此显示「会话不可用」。所以客户端在重新读盘后还会等该会话重新出现在会话列表里，再把
+`removed` 置回 `false` 并通知渲染——不需要切标签页。会话目录里没有它时（例如已被归档）不做这个处理，
+避免给不存在的会话开启输入框。
+
 * 正在生成（`agent.status === 'running'`）时拒绝删除，避免砍掉进行中的 turn。
 * 如果某次升级让 `AgentRegistry.resume` 的形状变了，这条路径失效 → 自动退回「排队到下次启动」，
   **不会破坏数据**。
@@ -139,7 +144,7 @@ DSH 的会话日志是**多个独立 Zstandard 帧的首尾拼接**，而每次�
 ## 开发自测
 
 八套自测，前七套自带沙箱（`.exp/sandbox-*` 的假 `$DSH_HOME`），**不会写入真实会话**；
-`test-theme` 只读源码：
+`test-theme` 只读源码，`test-composer-recovery` 用假窗口加载浏览器半、不碰任何会话：
 
 ```powershell
 node tools/test-host.mjs         # 宿主：inspect / apply / restore / 护栏 / header 帧逐字节复制
@@ -147,6 +152,7 @@ node tools/test-release.mjs      # 释放 live 会话 + 当场改写
 node tools/test-cachedview.mjs   # 只有缓存视图（无 Agent）时直接改写
 node tools/test-seeded.mjs       # fork 继承轮删除（重设切点）
 node tools/test-cascade.mjs      # 子智能体会话级联删除：递归 / fork 保留 / running 拒绝 / 释放失败上报
+node tools/test-composer-recovery.mjs  # 客户端：改写后清掉粘性 removed，输入框不再显示"会话不可用"
 node tools/test-backups.mjs      # 备份：手动创建 / 删除 / 清空，改写不留备份
 node tools/test-queue.mjs        # 排队兜底 + 启动执行
 node tools/test-theme.mjs        # 面板只用官方 token：无写死颜色、无自造 token
