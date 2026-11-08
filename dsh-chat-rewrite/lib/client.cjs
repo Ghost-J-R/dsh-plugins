@@ -510,7 +510,7 @@ window.__ModuleLoader__.load({
               + (failedChildren === 0 ? '' : fill(t('result.subagentsFailed'), { count: failedChildren })),
           })
           if (invalidated && typeof reload === 'function') {
-            void reload(sessionId)
+            void reload(sessionId, result.data?.cascade?.removed ?? [])
           }
           refresh()
           return
@@ -808,6 +808,65 @@ window.__ModuleLoader__.load({
       const RELIST_TIMEOUT_MS = 2000
       const RELIST_INTERVAL_MS = 100
       /**
+       * Make the client forget the subagent sessions this rewrite deleted.
+       *
+       * Two caches keep them visible: the session list (a subagent removal only
+       * flips a status flag, so the row stays) and the `subagentCatalog` projection
+       * (the list synthesizes rows from it, and an in-flight frame from before the
+       * cut already carries a HIGHER seq than the fresh catalog, so a plain clear
+       * loses that race). Filter these ids out of every catalog write, drop the
+       * cached rows once, and remove the summary rows. Their logs are gone, so no
+       * legitimate catalog can ever list them again.
+       *
+       * @param {string[]} ids - Subagent sessions this rewrite deleted.
+       * @param {string} sessionId - Session whose view was rewritten.
+       * @param {object} session - Its resident Session instance.
+       * @returns {void}
+       */
+      const forgetDeletedSessions = (ids, sessionId, session) => {
+        if (!Array.isArray(ids) || ids.length === 0) return
+        const deleted = ids.map(String)
+        const strip = (value, forgotten) => (Array.isArray(value)
+          ? value.filter((entry) => !forgotten.has(String(entry?.id ?? '')))
+          : value)
+        const guard = (store) => {
+          if (store === undefined || store === null) return
+          try {
+            if (!(store.__crForget instanceof Set)) {
+              store.__crForget = new Set()
+              for (const method of ['apply', 'applyCached', 'seed']) {
+                const original = store[method]
+                if (typeof original !== 'function') continue
+                store[method] = function guarded(...args) {
+                  const forgotten = this.__crForget
+                  try {
+                    if (method === 'apply' && args[0] === 'subagentCatalog') args[1] = strip(args[1], forgotten)
+                    if (method === 'applyCached' && args[0]?.subagentCatalog !== undefined) args[0] = { ...args[0], subagentCatalog: strip(args[0].subagentCatalog, forgotten) }
+                    if (method === 'seed' && args[0]?.values?.subagentCatalog !== undefined) args[0] = { ...args[0], values: { ...args[0].values, subagentCatalog: strip(args[0].values.subagentCatalog, forgotten) } }
+                  } catch { /* never break the store */ }
+                  return original.apply(this, args)
+                }
+              }
+            }
+            for (const id of deleted) store.__crForget.add(id)
+            store.clear?.()
+          } catch { /* a store that cannot be guarded keeps its cache */ }
+        }
+        const sessions = ctx.get('sessions')
+        // The list reads the manager-owned store; history seeding writes the
+        // session's own copy, and a child rewrite must also clean its root session.
+        guard(sessions?.manager?.projectionStore?.(sessionId))
+        guard(session?.projections)
+        const parentId = session?.address?.parentSessionId
+        if (typeof parentId === 'string' && parentId !== sessionId) {
+          guard(sessions?.manager?.projectionStore?.(parentId))
+          guard(sessions?.binding?.(parentId)?.session?.projections)
+        }
+        for (const id of deleted) {
+          try { sessions?.manager?.recordMutation?.({ kind: 'remove', sessionId: id }) } catch { /* best effort */ }
+        }
+      }
+      /**
        * Refresh one session on the client after its log was rewritten.
        *
        * Two things must happen, and the second one is not obvious:
@@ -829,13 +888,15 @@ window.__ModuleLoader__.load({
        * archived session never gets a live composer.
        *
        * @param {string} sessionId - Session whose transcript must be reloaded.
+       * @param {string[]} [removedIds] - Subagent sessions this rewrite deleted.
        * @returns {Promise<void>} resolves when the reload and flag repair settle.
        */
-      const reload = async (sessionId) => {
+      const reload = async (sessionId, removedIds = []) => {
         try {
           const sessions = ctx.get('sessions')
           const session = sessions?.binding?.(sessionId)?.session
           if (session === undefined || session === null) return
+          forgetDeletedSessions(removedIds, sessionId, session)
           if (typeof session.resync === 'function') await session.resync()
           const listed = () => {
             const list = sessions?.list?.getSnapshot?.()

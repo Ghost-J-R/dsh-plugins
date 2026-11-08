@@ -7,3 +7,8 @@ node_modules/
 # Logs and scratch files
 *.log
 *.tmp
+
+# Analysis scratch files
+.analysis-cache.md
+.analysis-archive/
+

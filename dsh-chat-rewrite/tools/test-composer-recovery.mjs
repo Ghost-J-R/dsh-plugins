@@ -61,14 +61,32 @@ function createContext(sessions) {
 }
 
 /** One fake resident Session, exactly the fields the repair touches. */
-function createSession({ removed = true, resyncError = null } = {}) {
+function createSession({ removed = true, resyncError = null, projections = null } = {}) {
   const calls = { resync: 0, markDirty: 0 }
   const session = {
     removed,
+    ...projections === null ? {} : { projections },
     resync: async () => { calls.resync++; if (resyncError !== null) throw resyncError },
     notifier: { markDirty: () => { calls.markDirty++ } },
   }
   return { session, calls }
+}
+
+/**
+ * A projection store stand-in recording what survives the guard: `lastCatalog`
+ * is what a late frame would leave behind.
+ * @returns {object} the store plus its observations.
+ */
+function createProjectionStore() {
+  const store = {
+    clears: 0,
+    lastCatalog: undefined,
+    clear() { this.clears++ },
+    apply(key, value) { if (key === 'subagentCatalog') this.lastCatalog = value },
+    applyCached() {},
+    seed() {},
+  }
+  return store
 }
 
 /** A catalog snapshot that starts without the session and gains it on demand. */
@@ -152,6 +170,62 @@ function createList(sessionId) {
   try { await reload(SESSION) } catch { threw = true }
   check('resync failure is contained', threw === false && session.removed === true,
     JSON.stringify({ threw, removed: session.removed }))
+}
+
+// 6. Deleted subagent sessions are forgotten: their summary rows are removed and
+//    their ids are filtered out of every catalog a late frame can re-add them to.
+{
+  const ghost = 'deleted-subagent'
+  const keptAgent = 'still-live-agent'
+  const managerStore = createProjectionStore()
+  const sessionStore = createProjectionStore()
+  const mutations = []
+  const { session } = createSession({ removed: false, projections: sessionStore })
+  const catalog = createList(SESSION)
+  catalog.relistSoon(0)
+  const { fullscreen } = createContext({
+    binding: () => ({ session }),
+    list: catalog.list,
+    manager: {
+      projectionStore: () => managerStore,
+      recordMutation: (mutation) => mutations.push(mutation),
+    },
+  })
+  const reload = fullscreen().inject().reload
+  await reload(SESSION, [ghost])
+  check('deleted row is removed from the list summaries',
+    mutations.length === 1 && mutations[0].kind === 'remove' && mutations[0].sessionId === ghost,
+    JSON.stringify(mutations))
+  check('manager store is cleared', managerStore.clears === 1, String(managerStore.clears))
+  check('session store is cleared', sessionStore.clears === 1, String(sessionStore.clears))
+  // The race that defeated a plain clear: a frame from the pre-truncation
+  // generation arrives afterwards with a higher seq and carries the deleted id.
+  managerStore.apply('subagentCatalog', [{ id: ghost }, { id: keptAgent }], 64)
+  check('late frame cannot resurrect the deleted agent',
+    Array.isArray(managerStore.lastCatalog)
+    && managerStore.lastCatalog.length === 1
+    && managerStore.lastCatalog[0].id === keptAgent,
+    JSON.stringify(managerStore.lastCatalog))
+}
+
+// 7. Nothing was deleted: no summary mutation and no store touching.
+{
+  const managerStore = createProjectionStore()
+  const sessionStore = createProjectionStore()
+  const mutations = []
+  const { session } = createSession({ removed: false, projections: sessionStore })
+  const catalog = createList(SESSION)
+  catalog.relistSoon(0)
+  const { fullscreen } = createContext({
+    binding: () => ({ session }),
+    list: catalog.list,
+    manager: { projectionStore: () => managerStore, recordMutation: (mutation) => mutations.push(mutation) },
+  })
+  const reload = fullscreen().inject().reload
+  await reload(SESSION, [])
+  check('no deletions leave the caches alone',
+    mutations.length === 0 && managerStore.clears === 0 && sessionStore.clears === 0,
+    JSON.stringify({ mutations, manager: managerStore.clears, session: sessionStore.clears }))
 }
 
 if (failures > 0) { console.log(`\nFAILED: ${failures}`); process.exit(1) }
